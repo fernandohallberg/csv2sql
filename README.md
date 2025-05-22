@@ -18,9 +18,11 @@ Automatize a importação de múltiplos arquivos CSV para tabelas MySQL com vali
 
 ```bash
 python3 script.py --csv data/*.csv --tabela minha_tabela --map mapeamento.json --dtypes tipos.json --chunksize 500 --verbose
+```
 
 ## ✅ csv2sql.py -h
 
+```bash
 usage: csv2sql.py [-h] --csv CSV [CSV ...] [--tabela TABELA] [--truncate] [--encoding ENCODING] [--sep SEP] [--conf CONF]
                   [--database DATABASE] [--map MAP] [--skip-header] [--dtypes DTYPES] [--no-header] [--force] [--logfile LOGFILE]
                   [--dry-run] [--chunksize CHUNKSIZE] [--verbose]
