@@ -91,8 +91,32 @@ def validar_numero_colunas(df, colunas_banco, force=False):
     else:
         logging.info("Validação: número de colunas compatível com a tabela.")
 
+def parse_validacoes(validate_fields_str):
+    validacoes = {}
+    if not validate_fields_str:
+        return validacoes
+    for item in validate_fields_str.split(';'):
+        campo, regra = item.split(',')
+        validacoes[campo.strip()] = regra.strip()
+    return validacoes
+
+def aplicar_validacoes(df, validacoes):
+    for campo, regra in validacoes.items():
+        if campo not in df.columns:
+            logging.warning(f"Campo '{campo}' não encontrado no DataFrame para validação.")
+            continue
+        if regra == 'notnull':
+            antes = len(df)
+            df = df[df[campo].notnull() & (df[campo].astype(str).str.strip() != '')]
+            depois = len(df)
+            logging.info(f"Validação '{campo} notnull': {antes} → {depois} linhas.")
+        else:
+            logging.warning(f"Regra de validação '{regra}' não implementada para o campo '{campo}'.")
+    return df
+
 def import_csv_to_mysql(csv_file, table_name, engine, db_name, mapeamento=None, truncate=False, encoding='utf-8',
-                        sep=';', skip_header=False, dtypes=None, no_header=False, force=False, dry_run=False, chunksize=None):
+                        sep=';', skip_header=False, dtypes=None, no_header=False, force=False, dry_run=False, 
+                        chunksize=None, validacoes=None):
     skip = 1 if skip_header else 0
     colunas_banco = colunas_tabela(engine, db_name, table_name)
 
@@ -127,6 +151,9 @@ def import_csv_to_mysql(csv_file, table_name, engine, db_name, mapeamento=None, 
         df = df[colunas_mapeadas]
         logging.info(f"Colunas renomeadas e filtradas: {colunas_mapeadas}")
 
+    if validacoes:
+        df = aplicar_validacoes(df, validacoes)
+
     if truncate:
         try:
             with engine.connect() as conn:
@@ -150,7 +177,7 @@ def import_csv_to_mysql(csv_file, table_name, engine, db_name, mapeamento=None, 
         logging.error(f"Erro ao inserir os dados na tabela {table_name}: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Importar múltiplos CSVs para MySQL com validação, mapeamento, dtypes, log, dry-run e inserção em lotes.", formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(description="Importar múltiplos CSVs para MySQL com validação, mapeamento, dtypes, log, dry-run, inserção em lotes e validação de campos.", formatter_class=argparse.RawTextHelpFormatter)
 
     parser.add_argument('--csv', required=True, nargs='+', help="Um ou mais arquivos CSV (suporta wildcard).")
     parser.add_argument('--tabela', required=False, help="Nome da tabela no banco de dados.")
@@ -168,6 +195,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help="Simula a importação sem inserir no banco.")
     parser.add_argument('--chunksize', type=int, default=None, help="Número de linhas por lote na inserção.")
     parser.add_argument('--verbose', action='store_true', help="Ativa modo detalhado de logging (DEBUG).")
+    parser.add_argument('--validate-fields', required=False, help="Validações de campos no formato: 'campo,regra;campo,regra'. Ex: 'razaosocial,notnull'.")
 
     args = parser.parse_args()
 
@@ -176,6 +204,8 @@ def main():
     if args.chunksize is not None and args.chunksize <= 0:
         logging.error("O valor de --chunksize deve ser um inteiro maior que 0.")
         sys.exit(1)
+
+    validacoes = parse_validacoes(args.validate_fields)
 
     carregar_dotenv(conf_path=args.conf)
 
@@ -220,7 +250,8 @@ def main():
             no_header=args.no_header,
             force=args.force,
             dry_run=args.dry_run,
-            chunksize=args.chunksize
+            chunksize=args.chunksize,
+            validacoes=validacoes
         )
 
 if __name__ == "__main__":
