@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import os
 import sys
 import json
@@ -15,15 +14,12 @@ def configurar_logger(logfile, verbose=False):
     level = logging.DEBUG if verbose else logging.INFO
     logger.setLevel(level)
     formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     logger.addHandler(console)
-
     file_handler = logging.FileHandler(logfile)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
-
     return logger
 
 def carregar_dotenv(conf_path=None):
@@ -58,9 +54,9 @@ def colunas_tabela(engine, db_name, table_name):
     try:
         with engine.connect() as conn:
             result = conn.execute(text(f"""
-                SELECT COLUMN_NAME 
-                FROM INFORMATION_SCHEMA.COLUMNS 
-                WHERE TABLE_SCHEMA = '{db_name}' 
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = '{db_name}'
                   AND TABLE_NAME = '{table_name}';
             """))
             colunas = [row[0] for row in result.fetchall()]
@@ -114,26 +110,63 @@ def aplicar_validacoes(df, validacoes):
             logging.warning(f"Regra de validação '{regra}' não implementada para o campo '{campo}'.")
     return df
 
+_FLOAT_DTYPE_NAMES = {'float', 'float16', 'float32', 'float64', 'float128',
+                      'Float32', 'Float64'}
+
+def _separar_dtypes_float(dtypes, decimal):
+    """Quando decimal != '.', retira colunas float do dtype para leitura como object,
+    pois o pandas não aplica o separador decimal em tipos nullable (Float64) ou numpy float.
+    Retorna (read_dtypes, {col: dtype_original}) para conversão posterior."""
+    if not dtypes or decimal == '.':
+        return dtypes, {}
+    read_dtypes = dict(dtypes)
+    float_cols = {}
+    for col, dtype in dtypes.items():
+        if str(dtype) in _FLOAT_DTYPE_NAMES:
+            float_cols[col] = dtype
+            read_dtypes[col] = 'object'
+    return read_dtypes, float_cols
+
+def _converter_float_cols(df, float_cols, decimal):
+    """Converte colunas lidas como object para o dtype float original,
+    trocando o separador decimal antes da conversão."""
+    for col, dtype in float_cols.items():
+        if col not in df.columns:
+            continue
+        try:
+            df[col] = (df[col]
+                       .astype(str)
+                       .str.strip()
+                       .str.replace(decimal, '.', regex=False)
+                       .pipe(pd.to_numeric, errors='coerce')
+                       .astype(dtype))
+            logging.info(f"Coluna '{col}' convertida para {dtype} com decimal='{decimal}'.")
+        except Exception as e:
+            logging.warning(f"Erro ao converter coluna '{col}' para {dtype}: {e}")
+    return df
+
 def import_csv_to_mysql(csv_file, table_name, engine, db_name, mapeamento=None, truncate=False, encoding='utf-8',
-                        sep=';', skip_header=False, dtypes=None, no_header=False, force=False, dry_run=False, 
-                        chunksize=None, validacoes=None):
+                        sep=';', skip_header=False, dtypes=None, no_header=False, force=False, dry_run=False,
+                        chunksize=None, validacoes=None, decimal='.'):
     skip = 1 if skip_header else 0
     colunas_banco = colunas_tabela(engine, db_name, table_name)
-
+    read_dtypes, float_cols = _separar_dtypes_float(dtypes, decimal)
     try:
         if no_header:
             logging.info(f"Modo sem cabeçalho ativado. Usando colunas da tabela: {colunas_banco}")
-            df = pd.read_csv(csv_file, encoding=encoding, sep=sep, header=None, names=colunas_banco, dtype=dtypes, skiprows=skip)
+            df = pd.read_csv(csv_file, encoding=encoding, sep=sep, header=None, names=colunas_banco,
+                             dtype=read_dtypes, skiprows=skip, decimal=decimal)
         else:
-            df = pd.read_csv(csv_file, encoding=encoding, sep=sep, skiprows=skip, dtype=dtypes)
+            df = pd.read_csv(csv_file, encoding=encoding, sep=sep, skiprows=skip, dtype=read_dtypes, decimal=decimal)
         logging.info(f"CSV '{csv_file}' carregado com sucesso. Linhas: {len(df)}.")
     except UnicodeDecodeError as e:
         logging.warning(f"Erro UTF-8: {e}, tentando ISO-8859-1...")
         try:
             if no_header:
-                df = pd.read_csv(csv_file, encoding='ISO-8859-1', sep=sep, header=None, names=colunas_banco, dtype=dtypes, skiprows=skip)
+                df = pd.read_csv(csv_file, encoding='ISO-8859-1', sep=sep, header=None, names=colunas_banco,
+                                 dtype=read_dtypes, skiprows=skip, decimal=decimal)
             else:
-                df = pd.read_csv(csv_file, encoding='ISO-8859-1', sep=sep, skiprows=skip, dtype=dtypes)
+                df = pd.read_csv(csv_file, encoding='ISO-8859-1', sep=sep, skiprows=skip, dtype=read_dtypes, decimal=decimal)
             logging.info(f"CSV '{csv_file}' carregado com sucesso usando ISO-8859-1.")
         except Exception as e:
             logging.error(f"Erro ao ler CSV com ISO-8859-1: {e}")
@@ -141,6 +174,9 @@ def import_csv_to_mysql(csv_file, table_name, engine, db_name, mapeamento=None, 
     except pd.errors.ParserError as e:
         logging.error(f"Erro de parsing ao ler CSV: {e}")
         return
+
+    if float_cols:
+        df = _converter_float_cols(df, float_cols, decimal)
 
     validar_numero_colunas(df, colunas_banco, force=force)
 
@@ -177,8 +213,10 @@ def import_csv_to_mysql(csv_file, table_name, engine, db_name, mapeamento=None, 
         logging.error(f"Erro ao inserir os dados na tabela {table_name}: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Importar múltiplos CSVs para MySQL com validação, mapeamento, dtypes, log, dry-run, inserção em lotes e validação de campos.", formatter_class=argparse.RawTextHelpFormatter)
-
+    parser = argparse.ArgumentParser(
+        description="Importar múltiplos CSVs para MySQL com validação, mapeamento, dtypes, log, dry-run, inserção em lotes e validação de campos.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
     parser.add_argument('--csv', required=True, nargs='+', help="Um ou mais arquivos CSV (suporta wildcard).")
     parser.add_argument('--tabela', required=False, help="Nome da tabela no banco de dados.")
     parser.add_argument('--truncate', action='store_true', help="Truncate a tabela antes de inserir (apenas no primeiro arquivo).")
@@ -196,7 +234,9 @@ def main():
     parser.add_argument('--chunksize', type=int, default=None, help="Número de linhas por lote na inserção.")
     parser.add_argument('--verbose', action='store_true', help="Ativa modo detalhado de logging (DEBUG).")
     parser.add_argument('--validate-fields', required=False, help="Validações de campos no formato: 'campo,regra;campo,regra'. Ex: 'razaosocial,notnull'.")
-
+    parser.add_argument('--read-dtype', required=False, help="JSON com dtypes para leitura do CSV (pandas.read_csv).")
+    parser.add_argument('--write-dtype', required=False, help="JSON com dtypes para escrita no MySQL (SQLAlchemy types).")
+    parser.add_argument('--decimal', default='.', help="Separador decimal do CSV (padrão: '.'). Use ',' para floats no formato brasileiro.")
     args = parser.parse_args()
 
     logger = configurar_logger(args.logfile, verbose=args.verbose)
@@ -206,7 +246,6 @@ def main():
         sys.exit(1)
 
     validacoes = parse_validacoes(args.validate_fields)
-
     carregar_dotenv(conf_path=args.conf)
 
     DB_HOST = os.getenv('DB_HOST')
@@ -214,11 +253,9 @@ def main():
     DB_USER = os.getenv('DB_USER')
     DB_PASSWORD = os.getenv('DB_PASSWORD')
     DB_NAME = args.database or os.getenv('DB_NAME')
-
     logging.info(f"Usando banco de dados: {DB_NAME}")
 
     engine_test = sa.create_engine(f'mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/information_schema')
-
     if not banco_existe(engine_test, DB_NAME):
         logging.error(f"Banco de dados '{DB_NAME}' não existe.")
         sys.exit(1)
@@ -235,7 +272,6 @@ def main():
     for idx, csv_file in enumerate(args.csv):
         should_truncate = args.truncate and idx == 0
         logging.info(f"\n🚀 Processando arquivo {idx + 1}/{len(args.csv)}: {csv_file}")
-
         import_csv_to_mysql(
             csv_file,
             table_name,
@@ -251,7 +287,8 @@ def main():
             force=args.force,
             dry_run=args.dry_run,
             chunksize=args.chunksize,
-            validacoes=validacoes
+            validacoes=validacoes,
+            decimal=args.decimal,
         )
 
 if __name__ == "__main__":
